@@ -526,13 +526,17 @@ export function readStoredCredential(
  * Stable ID of this installation, e.g. sent to OpenAI as its agent host ID.
  * Created on first use. Kept in auth.json rather than settings.json because
  * users share settings.json between machines, but auth.json stays on one machine.
+ * `createDeviceId` supplies the ID to store when auth.json has none.
  */
-export function getOrCreateDeviceId(authPath: string = join(getAgentDir(), "auth.json")): string {
+export function getOrCreateDeviceId(
+	authPath: string = join(getAgentDir(), "auth.json"),
+	createDeviceId: () => string = randomUUID,
+): string {
 	return new FileAuthStorageBackend(authPath).withLock((content) => {
 		const data = (content ? JSON.parse(stripBom(content)) : {}) as AuthStorageData;
 		const existing = data[DEVICE_ID_KEY];
 		if (typeof existing === "string") return { result: existing };
-		const deviceId = randomUUID();
+		const deviceId = createDeviceId();
 		return { result: deviceId, next: JSON.stringify({ ...data, [DEVICE_ID_KEY]: deviceId }, null, 2) };
 	});
 }

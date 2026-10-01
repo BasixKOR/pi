@@ -6,7 +6,9 @@ import chalk from "chalk";
 import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import { CONFIG_DIR_NAME, getAgentDir, getBinDir } from "./config.ts";
+import { getOrCreateDeviceId } from "./core/auth-storage.ts";
 import { migrateKeybindingsConfig } from "./core/keybindings.ts";
+import { FileSettingsStorage } from "./core/settings-manager.ts";
 import { stripBom } from "./utils/text.ts";
 
 const MIGRATION_GUIDE_URL =
@@ -70,6 +72,29 @@ export function migrateAuthToAuthJson(): string[] {
 	}
 
 	return providers;
+}
+
+/**
+ * Move the deviceId that pi 0.99.0 through 1.0.0 stored in the global settings.json to auth.json.
+ * Users share settings.json between machines, but auth.json stays on one machine.
+ * If auth.json already has a device ID, it is kept and the old one is dropped.
+ */
+function migrateDeviceIdToAuthJson(): void {
+	const agentDir = getAgentDir();
+	try {
+		new FileSettingsStorage(agentDir, agentDir).withLock("global", (current) => {
+			if (!current) return undefined;
+			const settings = JSON.parse(stripBom(current)) as Record<string, unknown>;
+			if (!("deviceId" in settings)) return undefined;
+			const { deviceId } = settings;
+			// Write auth.json before removing the ID from settings.json so a failure loses nothing.
+			if (typeof deviceId === "string") getOrCreateDeviceId(join(agentDir, "auth.json"), () => deviceId);
+			delete settings.deviceId;
+			return JSON.stringify(settings, null, 2);
+		});
+	} catch {
+		// Skip on error; SettingsManager reports invalid settings.json.
+	}
 }
 
 /**
@@ -307,6 +332,7 @@ export function runMigrations(cwd: string): {
 	deprecationWarnings: string[];
 } {
 	const migratedAuthProviders = migrateAuthToAuthJson();
+	migrateDeviceIdToAuthJson();
 	migrateSessionsFromAgentRoot();
 	migrateToolsToBin();
 	migrateKeybindingsConfigFile();
