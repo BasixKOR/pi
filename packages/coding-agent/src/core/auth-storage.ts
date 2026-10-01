@@ -4,6 +4,7 @@
  */
 
 import type { AuthOperationOptions, Credential, CredentialInfo, CredentialStore } from "@earendil-works/pi-ai";
+import { randomUUID } from "crypto";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "fs";
 import { dirname, join } from "path";
 import lockfile from "proper-lockfile";
@@ -14,7 +15,22 @@ import { getFileRevision, normalizePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
 import { isCommandConfigValue, resolveConfigValue } from "./resolve-config-value.ts";
 
-type AuthStorageData = Record<string, Credential>;
+/** Top-level auth.json key that holds this installation's device ID instead of a credential. */
+const DEVICE_ID_KEY = "deviceId";
+
+/** auth.json content: credentials by provider ID, plus the device ID under DEVICE_ID_KEY. */
+type AuthStorageData = Record<string, Credential | string>;
+
+function storedCredential(data: AuthStorageData, providerId: string): Credential | undefined {
+	const value = data[providerId];
+	return typeof value === "object" ? value : undefined;
+}
+
+function credentialInfos(data: AuthStorageData): CredentialInfo[] {
+	return Object.entries(data).flatMap(([providerId, value]) =>
+		typeof value === "object" ? [{ providerId, type: value.type }] : [],
+	);
+}
 
 type LockResult<T> = {
 	result: T;
@@ -226,6 +242,7 @@ export class ReadOnlyAuthStorage implements CredentialStore {
 			throw new Error("Invalid auth.json: expected an object");
 		}
 		for (const [providerId, credential] of Object.entries(parsed)) {
+			if (providerId === DEVICE_ID_KEY && typeof credential === "string") continue;
 			if (typeof credential !== "object" || credential === null || Array.isArray(credential)) {
 				throw new Error(`Invalid auth.json credential for provider "${providerId}"`);
 			}
@@ -257,7 +274,7 @@ export class ReadOnlyAuthStorage implements CredentialStore {
 
 	async read(providerId: string, options?: AuthOperationOptions): Promise<Credential | undefined> {
 		options?.signal?.throwIfAborted();
-		const credential = this.load()[providerId];
+		const credential = storedCredential(this.load(), providerId);
 		options?.signal?.throwIfAborted();
 		if (!credential) return undefined;
 		if (credential.type !== "api_key" || !credential.key || isCommandConfigValue(credential.key)) {
@@ -268,10 +285,7 @@ export class ReadOnlyAuthStorage implements CredentialStore {
 
 	async list(options?: AuthOperationOptions): Promise<readonly CredentialInfo[]> {
 		options?.signal?.throwIfAborted();
-		const credentials = Object.entries(this.load()).map(([providerId, credential]) => ({
-			providerId,
-			type: credential.type,
-		}));
+		const credentials = credentialInfos(this.load());
 		options?.signal?.throwIfAborted();
 		return credentials;
 	}
@@ -439,7 +453,7 @@ export class AuthStorage implements CredentialStore {
 	}
 
 	async read(provider: string, options?: AuthOperationOptions): Promise<Credential | undefined> {
-		const credential = (await this.readLatestData(options))[provider];
+		const credential = storedCredential(await this.readLatestData(options), provider);
 		options?.signal?.throwIfAborted();
 		if (credential?.type !== "api_key") return credential;
 		if (credential.key === undefined) return credential;
@@ -451,15 +465,17 @@ export class AuthStorage implements CredentialStore {
 		fn: (current: Credential | undefined) => Promise<Credential | undefined>,
 		options?: AuthOperationOptions,
 	): Promise<Credential | undefined> {
+		if (provider === DEVICE_ID_KEY) throw new Error(`"${DEVICE_ID_KEY}" is reserved in auth.json`);
 		let latestData = this.readState.data;
 		let revision: string | undefined;
 		const result = await this.storage.withLockAsync(async (content) => {
 			const currentData = this.parseStorageData(content);
-			const next = await fn(currentData[provider]);
+			const current = storedCredential(currentData, provider);
+			const next = await fn(current);
 			if (next === undefined) {
 				latestData = currentData;
 				revision = this.authPath ? getFileRevision(this.authPath) : undefined;
-				return { result: currentData[provider] };
+				return { result: current };
 			}
 
 			const merged: AuthStorageData = { ...currentData, [provider]: next };
@@ -471,6 +487,7 @@ export class AuthStorage implements CredentialStore {
 	}
 
 	async delete(provider: string, options?: AuthOperationOptions): Promise<void> {
+		if (provider === DEVICE_ID_KEY) throw new Error(`"${DEVICE_ID_KEY}" is reserved in auth.json`);
 		let latestData = this.readState.data;
 		await this.storage.withLockAsync(async (content) => {
 			const currentData = this.parseStorageData(content);
@@ -483,9 +500,9 @@ export class AuthStorage implements CredentialStore {
 
 	/** List credential metadata without resolving configured key values. */
 	async list(options?: AuthOperationOptions): Promise<readonly CredentialInfo[]> {
-		const entries = Object.entries(await this.readLatestData(options));
+		const credentials = credentialInfos(await this.readLatestData(options));
 		options?.signal?.throwIfAborted();
-		return entries.map(([providerId, credential]) => ({ providerId, type: credential.type }));
+		return credentials;
 	}
 }
 
@@ -499,8 +516,23 @@ export function readStoredCredential(
 ): Credential | undefined {
 	try {
 		const data = JSON.parse(stripBom(readFileSync(normalizePath(authPath), "utf-8"))) as AuthStorageData;
-		return data[providerId];
+		return storedCredential(data, providerId);
 	} catch {
 		return undefined;
 	}
+}
+
+/**
+ * Stable ID of this installation, e.g. sent to OpenAI as its agent host ID.
+ * Created on first use. Kept in auth.json rather than settings.json because
+ * users share settings.json between machines, but auth.json stays on one machine.
+ */
+export function getOrCreateDeviceId(authPath: string = join(getAgentDir(), "auth.json")): string {
+	return new FileAuthStorageBackend(authPath).withLock((content) => {
+		const data = (content ? JSON.parse(stripBom(content)) : {}) as AuthStorageData;
+		const existing = data[DEVICE_ID_KEY];
+		if (typeof existing === "string") return { result: existing };
+		const deviceId = randomUUID();
+		return { result: deviceId, next: JSON.stringify({ ...data, [DEVICE_ID_KEY]: deviceId }, null, 2) };
+	});
 }

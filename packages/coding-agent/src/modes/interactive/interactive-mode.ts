@@ -67,6 +67,7 @@ import {
 import { type AgentSession, type AgentSessionEvent, parseSkillBlock } from "../../core/agent-session.ts";
 import { type AgentSessionRuntime, SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
 import type { AgentSessionRuntimeDiagnostic } from "../../core/agent-session-services.ts";
+import { getOrCreateDeviceId } from "../../core/auth-storage.ts";
 import {
 	CACHE_TTL_MS,
 	type CacheMiss,
@@ -6250,7 +6251,7 @@ export class InteractiveMode {
 				prompt: (prompt) => this.showAuthPrompt(dialog, prompt, providerId),
 				notify: (event) => this.notifyAuthDialog(dialog, event),
 			},
-			{ getDeviceId: () => this.settingsManager.getOrCreateDeviceId() },
+			{ getDeviceId: () => getOrCreateDeviceId(path.join(this.runtimeHost.services.agentDir, "auth.json")) },
 		);
 	}
 

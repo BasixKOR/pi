@@ -4,7 +4,13 @@ import { join } from "node:path";
 import { type CredentialStore, createModels, type Provider } from "@earendil-works/pi-ai";
 import lockfile from "proper-lockfile";
 import { afterEach, beforeEach, describe, expect, test, vi } from "vitest";
-import { AuthStorage, FileAuthStorageBackend } from "../src/core/auth-storage.ts";
+import {
+	AuthStorage,
+	FileAuthStorageBackend,
+	getOrCreateDeviceId,
+	ReadOnlyAuthStorage,
+	readStoredCredential,
+} from "../src/core/auth-storage.ts";
 
 describe("AuthStorage", () => {
 	const tempDir = join(tmpdir(), `pi-test-auth-storage-${Date.now()}-${Math.random().toString(36).slice(2)}`);
@@ -35,6 +41,35 @@ describe("AuthStorage", () => {
 			if (original === undefined) delete process.env.TEST_AUTH_STORAGE_KEY;
 			else process.env.TEST_AUTH_STORAGE_KEY = original;
 		}
+	});
+
+	test("stores one device ID in auth.json next to credentials without exposing it as a credential", async () => {
+		const credential = { type: "api_key" as const, key: "anthropic-key" };
+		writeAuthJson({ anthropic: credential });
+
+		const deviceId = getOrCreateDeviceId(authJsonPath);
+
+		expect(deviceId).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/);
+		expect(getOrCreateDeviceId(authJsonPath)).toBe(deviceId);
+		expect(JSON.parse(readFileSync(authJsonPath, "utf-8"))).toEqual({ anthropic: credential, deviceId });
+
+		const storage = AuthStorage.create(authJsonPath);
+		expect(await storage.list()).toEqual([{ providerId: "anthropic", type: "api_key" }]);
+		expect(await storage.read("deviceId")).toBeUndefined();
+		await expect(storage.modify("deviceId", async () => credential)).rejects.toThrow("reserved");
+
+		await storage.modify("openai", async () => ({ type: "api_key", key: "openai-key" }));
+		await storage.delete("anthropic");
+		expect(JSON.parse(readFileSync(authJsonPath, "utf-8"))).toEqual({
+			deviceId,
+			openai: { type: "api_key", key: "openai-key" },
+		});
+		expect(getOrCreateDeviceId(authJsonPath)).toBe(deviceId);
+
+		const readOnly = new ReadOnlyAuthStorage(authJsonPath);
+		expect(await readOnly.list()).toEqual([{ providerId: "openai", type: "api_key" }]);
+		expect(await readOnly.read("deviceId")).toBeUndefined();
+		expect(readStoredCredential("deviceId", authJsonPath)).toBeUndefined();
 	});
 
 	test("resolves command-backed API-key credentials", async () => {
